@@ -1,0 +1,92 @@
+package com.example.consumer;
+
+import com.example.model.LogEntry;
+import com.example.util.LogParser;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+
+public class FlinkLogAnalysis {
+
+    public static void main(String[] args) throws Exception {
+        // 1. 创建 Flink 执行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        
+        // 设置并行度为2，适配2核CPU
+        env.setParallelism(2);
+
+        // 2. 配置 Kafka Source
+        // 注意：因为Producer和Flink都在同一台机器，使用 localhost
+        KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
+            .setBootstrapServers("localhost:9092")
+            .setTopics("access-log")
+            .setGroupId("flink-log-consumer-group")
+            .setStartingOffsets(OffsetsInitializer.latest()) // 从最新位置开始消费，忽略历史数据
+            .setValueOnlyDeserializer(new SimpleStringSchema())
+            .build();
+
+        // 3. 读取 Kafka 数据流
+        DataStream<String> rawStream = env.fromSource(
+            kafkaSource,
+            WatermarkStrategy.noWatermarks(),
+            "Kafka Source"
+        );
+
+        // 4. 解析日志字符串为 LogEntry 对象
+        // 使用独立的 LogParser 工具类进行解析
+        DataStream<LogEntry> logStream = rawStream.map(new MapFunction<String, LogEntry>() {
+            @Override
+            public LogEntry map(String line) throws Exception {
+                return LogParser.parse(line);
+            }
+        }).filter(log -> log != null); // 过滤掉解析失败的 null 值
+
+        // ========== 功能一：PV统计（5秒滚动窗口）==========
+        // 统计每个 API 接口在 5 秒内的访问次数
+        logStream
+            .map(log -> Tuple2.of(log.getApiPath(), 1))
+            .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
+                org.apache.flink.api.common.typeinfo.Types.STRING,
+                org.apache.flink.api.common.typeinfo.Types.INT))
+            .keyBy(t -> t.f0) // 按 API 路径分组
+            .window(TumblingProcessingTimeWindows.of(Time.seconds(5))) // 5秒滚动窗口
+            .sum(1) // 对计数求和
+            .map(t -> "[PV统计] 接口: " + t.f0 + " | 5秒内访问次数: " + t.f1)
+            .print(); // 输出到控制台/日志
+
+        // ========== 功能二：ERROR异常检测 ==========
+        // 实时捕获 ERROR 级别日志并告警
+        logStream
+            .filter(log -> "ERROR".equals(log.getLevel())) // 过滤出 ERROR 日志
+            .map(log -> "[ERROR告警] 检测到异常！路径: " + log.getApiPath()
+                + " | IP: " + log.getIp()
+                + " | 响应时间: " + log.getResponseTime() + "ms")
+            .print();
+
+        // ========== 功能三：IP频率分析（10秒滑动窗口，每5秒滑动一次）==========
+        // 识别高频访问 IP，用于防刷或攻击检测
+        logStream
+            .map(log -> Tuple2.of(log.getIp(), 1))
+            .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
+                org.apache.flink.api.common.typeinfo.Types.STRING,
+                org.apache.flink.api.common.typeinfo.Types.INT))
+            .keyBy(t -> t.f0) // 按 IP 分组
+            .window(SlidingProcessingTimeWindows.of(Time.seconds(10), Time.seconds(5))) // 窗口大小10s，滑动步长5s
+            .sum(1)
+            .filter(t -> t.f1 > 5)  // 阈值：10秒内访问超过5次则标记
+            .map(t -> "[IP分析] 高频访问 IP: " + t.f0 + " | 10秒内访问次数: " + t.f1)
+            .print();
+
+        // 5. 启动 Flink 任务
+        // 给任务起个名字，方便在 Web UI 识别
+        env.execute("Kafka-Flink Real-time Log Analysis");
+    }
+}
