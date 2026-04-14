@@ -17,7 +17,7 @@ import java.util.Date;
  *
  * 每条记录会附加时间戳前缀，格式：[yyyy-MM-dd HH:mm:ss] 原始内容
  * 使用追加模式，重启不会覆盖已有数据。
- * 建议配合 .setParallelism(1) 使用，避免多实例写同一文件的竞态。
+ * 配合 .setParallelism(1) 使用，避免多实例写同一文件的竞态。
  */
 public class FileWriterSink extends RichSinkFunction<String> implements Serializable {
 

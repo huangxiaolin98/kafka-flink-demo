@@ -1,6 +1,8 @@
 package com.example.model;
 
 import java.io.Serializable;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 public class LogEntry implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -31,6 +33,27 @@ public class LogEntry implements Serializable {
     public String getIp() { return ip; }
     public int getStatusCode() { return statusCode; }
     public long getResponseTime() { return responseTime; }
+
+    /**
+     * 将时间戳字符串转换为 epoch 毫秒值，用于计算处理延迟。
+     * 兼容 "yyyy-MM-dd HH:mm:ss.SSS" 和 "yyyy-MM-dd HH:mm:ss" 两种格式。
+     */
+    public long getTimestampMillis() {
+        if (timestamp == null) return 0L;
+        try {
+            SimpleDateFormat sdfMs = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+            Date date = sdfMs.parse(timestamp);
+            return date.getTime();
+        } catch (Exception e1) {
+            try {
+                SimpleDateFormat sdfSec = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                Date date = sdfSec.parse(timestamp);
+                return date.getTime();
+            } catch (Exception e2) {
+                return 0L;
+            }
+        }
+    }
 
     @Override
     public String toString() {

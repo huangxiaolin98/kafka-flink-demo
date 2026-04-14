@@ -6,6 +6,7 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -22,22 +23,31 @@ public class FlinkLogAnalysis {
     private static final String OUTPUT_PV = "output/pv-stats.log";
     private static final String OUTPUT_ERROR = "output/error-alerts.log";
     private static final String OUTPUT_IP = "output/ip-stats.log";
+    private static final String OUTPUT_LATENCY = "output/latency-stats.log";
 
     public static void main(String[] args) throws Exception {
         // 1. 创建 Flink 执行环境
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         
-        // 设置并行度为2，适配2核CPU
-        env.setParallelism(2);
+        // 不硬编码并行度，由运行环境决定：
+        // - 集群模式(flink run)：使用 flink-conf.yaml 中的 parallelism.default
+        // - 本地模式(java -cp)：默认使用 CPU 核心数
+        // 启用对象复用，避免算子间深拷贝，减少 GC 压力
+        env.getConfig().enableObjectReuse();
+        // 设置缓冲超时为 5ms，降低算子间数据交换延迟
+        env.setBufferTimeout(5);
 
         // 2. 配置 Kafka Source
-        // 注意：因为Producer和Flink都在同一台机器，使用 localhost
         KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
             .setBootstrapServers("localhost:9092")
             .setTopics("access-log")
             .setGroupId("flink-log-consumer-group")
             .setStartingOffsets(OffsetsInitializer.latest()) // 从最新位置开始消费，忽略历史数据
             .setValueOnlyDeserializer(new SimpleStringSchema())
+            // 消费端拉取优化：增大每次拉取的数据量，减少网络请求次数
+            .setProperty("fetch.min.bytes", "1048576")          // 每次至少拉取 1MB
+            .setProperty("fetch.max.wait.ms", "100")            // 最多等待 100ms 凑够数据
+            .setProperty("max.partition.fetch.bytes", "2097152") // 每分区每次最多拉取 2MB
             .build();
 
         // 3. 读取 Kafka 数据流
@@ -48,7 +58,6 @@ public class FlinkLogAnalysis {
         );
 
         // 4. 解析日志字符串为 LogEntry 对象
-        // 使用独立的 LogParser 工具类进行解析
         DataStream<LogEntry> logStream = rawStream.map(new MapFunction<String, LogEntry>() {
             @Override
             public LogEntry map(String line) throws Exception {
@@ -126,8 +135,57 @@ public class FlinkLogAnalysis {
                 .setParallelism(1)
                 .name("IP Analysis File Sink");
 
+        // ========== 功能四：延迟监控（10秒滚动窗口，用于压力测试）==========
+        // 计算每条消息从 Producer 生成到 Flink 处理的端到端延迟
+        // 使用全局窗口统计平均延迟、最大延迟和背压状态
+        DataStream<String> latencyStream = logStream
+            // --- Map 阶段：计算每条消息的处理延迟 ---
+            .map(log -> {
+                long genTime = log.getTimestampMillis();
+                long now = System.currentTimeMillis();
+                long latency = genTime > 0 ? Math.max(0, now - genTime) : 0;
+                return Tuple3.of(latency, latency, 1L);
+            })
+            .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
+                org.apache.flink.api.common.typeinfo.Types.LONG,
+                org.apache.flink.api.common.typeinfo.Types.LONG,
+                org.apache.flink.api.common.typeinfo.Types.LONG))
+            // --- 全局 10 秒滚动窗口聚合 ---
+            .windowAll(TumblingProcessingTimeWindows.of(Time.seconds(10)))
+            // --- Reduce 阶段：累加延迟总和、取最大延迟、累加计数 ---
+            .reduce(new ReduceFunction<Tuple3<Long, Long, Long>>() {
+                @Override
+                public Tuple3<Long, Long, Long> reduce(Tuple3<Long, Long, Long> a, Tuple3<Long, Long, Long> b) {
+                    return Tuple3.of(a.f0 + b.f0, Math.max(a.f1, b.f1), a.f2 + b.f2);
+                }
+            })
+            // --- 格式化输出：平均延迟、最大延迟、消息量、背压判断 ---
+            .map(t -> {
+                long avgLatency = t.f2 > 0 ? t.f0 / t.f2 : 0;
+                long maxLatency = t.f1;
+                long msgCount = t.f2;
+                String backpressure;
+                if (avgLatency < 100) {
+                    backpressure = "无背压";
+                } else if (avgLatency < 500) {
+                    backpressure = "轻微背压";
+                } else {
+                    backpressure = "明显背压";
+                }
+                return "[延迟监控] 窗口消息数: " + msgCount
+                    + " | 平均延迟: " + avgLatency + "ms"
+                    + " | 最大延迟: " + maxLatency + "ms"
+                    + " | 背压状态: " + backpressure;
+            })
+            .returns(org.apache.flink.api.common.typeinfo.Types.STRING);
+
+        latencyStream.print();
+        latencyStream.addSink(new FileWriterSink(OUTPUT_LATENCY))
+                     .setParallelism(1)
+                     .name("Latency Monitor File Sink");
+
         // 5. 启动 Flink 任务
-        // 给任务起个名字，方便在 Web UI 识别
+        
         env.execute("Kafka-Flink Real-time Log Analysis");
     }
 }
