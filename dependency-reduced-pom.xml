@@ -41,5 +41,6 @@
     <maven.compiler.source>11</maven.compiler.source>
     <flink.version>1.17.0</flink.version>
     <kafka.version>2.8.0</kafka.version>
+    <hadoop.version>3.3.4</hadoop.version>
   </properties>
 </project>

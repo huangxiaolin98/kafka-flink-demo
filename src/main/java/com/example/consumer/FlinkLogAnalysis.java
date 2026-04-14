@@ -4,6 +4,7 @@ import com.example.model.LogEntry;
 import com.example.util.LogParser;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
@@ -50,17 +51,25 @@ public class FlinkLogAnalysis {
         }).filter(log -> log != null); // 过滤掉解析失败的 null 值
 
         // ========== 功能一：PV统计（5秒滚动窗口）==========
-        // 统计每个 API 接口在 5 秒内的访问次数
+        // 采用显式的 MapReduce 模式：Map阶段 -> Shuffle阶段 -> Reduce阶段
         logStream
+            // --- Map 阶段：将每条日志映射为 <apiPath, 1> 键值对 ---
             .map(log -> Tuple2.of(log.getApiPath(), 1))
             .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
                 org.apache.flink.api.common.typeinfo.Types.STRING,
                 org.apache.flink.api.common.typeinfo.Types.INT))
-            .keyBy(t -> t.f0) // 按 API 路径分组
-            .window(TumblingProcessingTimeWindows.of(Time.seconds(5))) // 5秒滚动窗口
-            .sum(1) // 对计数求和
+            // --- Shuffle 阶段：按 API 路径分区，相同 key 的数据汇聚到一起 ---
+            .keyBy(t -> t.f0)
+            .window(TumblingProcessingTimeWindows.of(Time.seconds(5)))
+            // --- Reduce 阶段：对同一 key 的计数值进行累加聚合 ---
+            .reduce(new ReduceFunction<Tuple2<String, Integer>>() {
+                @Override
+                public Tuple2<String, Integer> reduce(Tuple2<String, Integer> a, Tuple2<String, Integer> b) {
+                    return Tuple2.of(a.f0, a.f1 + b.f1);
+                }
+            })
             .map(t -> "[PV统计] 接口: " + t.f0 + " | 5秒内访问次数: " + t.f1)
-            .print(); // 输出到控制台/日志
+            .print();
 
         // ========== 功能二：ERROR异常检测 ==========
         // 实时捕获 ERROR 级别日志并告警
@@ -72,15 +81,23 @@ public class FlinkLogAnalysis {
             .print();
 
         // ========== 功能三：IP频率分析（10秒滑动窗口，每5秒滑动一次）==========
-        // 识别高频访问 IP，用于防刷或攻击检测
+        // 同样采用 MapReduce 模式，识别高频访问 IP
         logStream
+            // --- Map 阶段：将日志映射为 <IP, 1> 键值对 ---
             .map(log -> Tuple2.of(log.getIp(), 1))
             .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
                 org.apache.flink.api.common.typeinfo.Types.STRING,
                 org.apache.flink.api.common.typeinfo.Types.INT))
-            .keyBy(t -> t.f0) // 按 IP 分组
-            .window(SlidingProcessingTimeWindows.of(Time.seconds(10), Time.seconds(5))) // 窗口大小10s，滑动步长5s
-            .sum(1)
+            // --- Shuffle 阶段：按 IP 分区 ---
+            .keyBy(t -> t.f0)
+            .window(SlidingProcessingTimeWindows.of(Time.seconds(10), Time.seconds(5)))
+            // --- Reduce 阶段：累加同一 IP 的访问计数 ---
+            .reduce(new ReduceFunction<Tuple2<String, Integer>>() {
+                @Override
+                public Tuple2<String, Integer> reduce(Tuple2<String, Integer> a, Tuple2<String, Integer> b) {
+                    return Tuple2.of(a.f0, a.f1 + b.f1);
+                }
+            })
             .filter(t -> t.f1 > 5)  // 阈值：10秒内访问超过5次则标记
             .map(t -> "[IP分析] 高频访问 IP: " + t.f0 + " | 10秒内访问次数: " + t.f1)
             .print();

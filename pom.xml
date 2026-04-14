@@ -13,6 +13,7 @@
         <maven.compiler.target>11</maven.compiler.target>
         <flink.version>1.17.0</flink.version>
         <kafka.version>2.8.0</kafka.version>
+        <hadoop.version>3.3.4</hadoop.version>
         <scala.binary.version>2.12</scala.binary.version>
     </properties>
 
@@ -48,6 +49,23 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
             <version>1.7.36</version>
+        </dependency>
+
+        <!-- Hadoop MapReduce -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-core</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-common</artifactId>
+            <version>${hadoop.version}</version>
         </dependency>
     </dependencies>
 
