@@ -1,5 +1,0 @@
-com/example/util/LogParser.class
-com/example/model/LogEntry.class
-com/example/consumer/FlinkLogAnalysis$1.class
-com/example/consumer/FlinkLogAnalysis.class
-com/example/producer/LogProducer.class
