@@ -56,6 +56,8 @@ src/main/java/com/example/
 │   └── LogProducer.java           # Kafka 生产者，模拟日志数据
 ├── consumer/
 │   └── FlinkLogAnalysis.java      # Flink 消费端，流式 MapReduce 分析
+├── sink/
+│   └── FileWriterSink.java        # 自定义文件 Sink，追加写入结果文件
 ├── mapreduce/
 │   ├── LogPvMapReduce.java        # Hadoop MapReduce：API PV 统计
 │   └── LogIpMapReduce.java        # Hadoop MapReduce：IP 访问量统计
@@ -144,10 +146,26 @@ java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.mapreduce.LogIpMap
 
 ### Flink 实时输出
 
+控制台输出：
 ```
 [PV统计] 接口: /api/login | 5秒内访问次数: 8
 [ERROR告警] 检测到异常！路径: /api/payment | IP: 10.0.0.1 | 响应时间: 2103ms
 [IP分析] 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
+```
+
+同时，Flink 会将结果写入文件（追加模式，每行带时间戳前缀）：
+
+| 功能 | 输出文件 |
+|------|---------|
+| PV 统计 | `output/pv-stats.log` |
+| ERROR 告警 | `output/error-alerts.log` |
+| IP 频率分析 | `output/ip-stats.log` |
+
+文件输出示例：
+```
+[2026-04-14 10:30:05] [PV统计] 接口: /api/login | 5秒内访问次数: 8
+[2026-04-14 10:30:05] [ERROR告警] 检测到异常！路径: /api/payment | IP: 10.0.0.1 | 响应时间: 2103ms
+[2026-04-14 10:30:10] [IP分析] 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
 ```
 
 ### MapReduce 批处理输出

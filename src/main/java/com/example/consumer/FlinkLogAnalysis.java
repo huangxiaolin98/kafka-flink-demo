@@ -14,8 +14,14 @@ import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeW
 import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import com.example.sink.FileWriterSink;
 
 public class FlinkLogAnalysis {
+
+    // 输出文件路径
+    private static final String OUTPUT_PV = "output/pv-stats.log";
+    private static final String OUTPUT_ERROR = "output/error-alerts.log";
+    private static final String OUTPUT_IP = "output/ip-stats.log";
 
     public static void main(String[] args) throws Exception {
         // 1. 创建 Flink 执行环境
@@ -52,7 +58,7 @@ public class FlinkLogAnalysis {
 
         // ========== 功能一：PV统计（5秒滚动窗口）==========
         // 采用显式的 MapReduce 模式：Map阶段 -> Shuffle阶段 -> Reduce阶段
-        logStream
+        DataStream<String> pvStream = logStream
             // --- Map 阶段：将每条日志映射为 <apiPath, 1> 键值对 ---
             .map(log -> Tuple2.of(log.getApiPath(), 1))
             .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
@@ -69,20 +75,30 @@ public class FlinkLogAnalysis {
                 }
             })
             .map(t -> "[PV统计] 接口: " + t.f0 + " | 5秒内访问次数: " + t.f1)
-            .print();
+            .returns(org.apache.flink.api.common.typeinfo.Types.STRING);
+
+        pvStream.print();
+        pvStream.addSink(new FileWriterSink(OUTPUT_PV))
+                .setParallelism(1)
+                .name("PV File Sink");
 
         // ========== 功能二：ERROR异常检测 ==========
         // 实时捕获 ERROR 级别日志并告警
-        logStream
+        DataStream<String> errorStream = logStream
             .filter(log -> "ERROR".equals(log.getLevel())) // 过滤出 ERROR 日志
             .map(log -> "[ERROR告警] 检测到异常！路径: " + log.getApiPath()
                 + " | IP: " + log.getIp()
                 + " | 响应时间: " + log.getResponseTime() + "ms")
-            .print();
+            .returns(org.apache.flink.api.common.typeinfo.Types.STRING);
+
+        errorStream.print();
+        errorStream.addSink(new FileWriterSink(OUTPUT_ERROR))
+                   .setParallelism(1)
+                   .name("Error Alert File Sink");
 
         // ========== 功能三：IP频率分析（10秒滑动窗口，每5秒滑动一次）==========
         // 同样采用 MapReduce 模式，识别高频访问 IP
-        logStream
+        DataStream<String> ipStream = logStream
             // --- Map 阶段：将日志映射为 <IP, 1> 键值对 ---
             .map(log -> Tuple2.of(log.getIp(), 1))
             .returns(org.apache.flink.api.common.typeinfo.Types.TUPLE(
@@ -99,8 +115,16 @@ public class FlinkLogAnalysis {
                 }
             })
             .filter(t -> t.f1 > 5)  // 阈值：10秒内访问超过5次则标记
-            .map(t -> "[IP分析] 高频访问 IP: " + t.f0 + " | 10秒内访问次数: " + t.f1)
-            .print();
+            .map(t -> "[IP分析] 时间: " + java.time.LocalTime.now().format(
+                java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"))
+                + " | 高频访问 IP: " + t.f0
+                + " | 10秒内访问次数: " + t.f1)
+            .returns(org.apache.flink.api.common.typeinfo.Types.STRING);
+
+        ipStream.print();
+        ipStream.addSink(new FileWriterSink(OUTPUT_IP))
+                .setParallelism(1)
+                .name("IP Analysis File Sink");
 
         // 5. 启动 Flink 任务
         // 给任务起个名字，方便在 Web UI 识别
