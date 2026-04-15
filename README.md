@@ -16,7 +16,8 @@ Kafka Topic: access-log
 FlinkLogAnalysis (Flink Consumer，内部采用 MapReduce 模式)
     ├── PV 统计（5 秒滚动窗口）── Map → Shuffle → Reduce
     ├── ERROR 异常实时告警
-    └── IP 高频访问检测（10 秒滑动窗口）── Map → Shuffle → Reduce
+    ├── IP 高频访问检测（10 秒滑动窗口）── Map → Shuffle → Reduce
+    └── 延迟监控（10 秒滚动窗口）── Map → windowAll → Reduce
 
 === 批处理链路（Hadoop MapReduce）===
 
@@ -38,6 +39,7 @@ logs/access.log
 | PV 统计 | 5 秒滚动窗口 (Tumbling) | Map(log→<path,1>) → keyBy → Reduce(sum) |
 | ERROR 告警 | 无窗口（实时） | Filter + Map |
 | IP 频率分析 | 10 秒滑动窗口 (Sliding, 步长 5s) | Map(log→<ip,1>) → keyBy → Reduce(sum) |
+| 延迟监控 | 10 秒滚动窗口 (Tumbling, 全局) | Map(log→<latencySum, maxLatency, count>) → windowAll → Reduce |
 
 ### 批处理（Hadoop MapReduce）
 
@@ -98,10 +100,16 @@ mvn clean package
 **1. 启动 Kafka Producer（模拟日志）**
 
 ```bash
+# 正常模式：100ms 间隔，无限运行
 java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.producer.LogProducer
+
+# 压力测试模式：自定义发送间隔(ms) 和持续时间(s)
+java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.producer.LogProducer <间隔ms> <持续时间s>
+# 示例：不限速发送，持续 60 秒
+java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.producer.LogProducer 0 60
 ```
 
-Producer 将以每秒约 10 条的速率持续发送模拟日志。
+正常模式下 Producer 以每秒约 10 条的速率持续发送；压力测试模式会输出每秒吞吐量统计和测试总结。
 
 **2. 启动 Flink 实时分析**
 
@@ -136,11 +144,11 @@ java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.mapreduce.LogIpMap
 ## 日志格式
 
 ```
-2026-04-13 17:30:00 | INFO  | /api/login      | 192.168.1.1     | 200 | 45ms
-2026-04-13 17:30:01 | ERROR | /api/payment    | 10.0.0.1        | 500 | 2103ms
+2026-04-13 17:30:00.123 | INFO  | /api/login      | 192.168.1.1     | 200 | 45ms
+2026-04-13 17:30:01.456 | ERROR | /api/payment    | 10.0.0.1        | 500 | 2103ms
 ```
 
-字段依次为：时间戳、日志级别、API 路径、客户端 IP、HTTP 状态码、响应时间。
+字段依次为：时间戳（毫秒精度）、日志级别、API 路径、客户端 IP、HTTP 状态码、响应时间。
 
 ## 输出示例
 
@@ -150,7 +158,8 @@ java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.mapreduce.LogIpMap
 ```
 [PV统计] 接口: /api/login | 5秒内访问次数: 8
 [ERROR告警] 检测到异常！路径: /api/payment | IP: 10.0.0.1 | 响应时间: 2103ms
-[IP分析] 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
+[IP分析] 时间: 17:30:10 | 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
+[延迟监控] 窗口消息数: 100 | 平均延迟: 35ms | 最大延迟: 128ms | 背压状态: 无背压
 ```
 
 同时，Flink 会将结果写入文件（追加模式，每行带时间戳前缀）：
@@ -160,12 +169,14 @@ java -cp target/kafka-flink-demo-1.0-SNAPSHOT.jar com.example.mapreduce.LogIpMap
 | PV 统计 | `output/pv-stats.log` |
 | ERROR 告警 | `output/error-alerts.log` |
 | IP 频率分析 | `output/ip-stats.log` |
+| 延迟监控 | `output/latency-stats.log` |
 
 文件输出示例：
 ```
 [2026-04-14 10:30:05] [PV统计] 接口: /api/login | 5秒内访问次数: 8
 [2026-04-14 10:30:05] [ERROR告警] 检测到异常！路径: /api/payment | IP: 10.0.0.1 | 响应时间: 2103ms
-[2026-04-14 10:30:10] [IP分析] 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
+[2026-04-14 10:30:10] [IP分析] 时间: 10:30:10 | 高频访问 IP: 192.168.1.1 | 10秒内访问次数: 7
+[2026-04-14 10:30:10] [延迟监控] 窗口消息数: 100 | 平均延迟: 35ms | 最大延迟: 128ms | 背压状态: 无背压
 ```
 
 ### MapReduce 批处理输出
